@@ -2,6 +2,9 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
+import java.util.HashMap;
+import java.util.Map;
+import java.io.*;
 
 public class Sender {
 
@@ -20,79 +23,85 @@ public class Sender {
 
         FileInputStream input_stream = null;
         DatagramSocket sender_socket = null;
+
+        DatagramPacket UDP_datagram = null;
+        // Initial Handshake
+        int timeout_count = 0;
+
+        try {
+
+            sender_socket = new DatagramSocket(sender_ack_port);
+            sender_socket.setSoTimeout(timeout_ms);
+            DSPacket SOT_packet = new DSPacket(DSPacket.TYPE_SOT, 0, null);
+            byte[] raw_bytes = SOT_packet.toBytes();
+
+            UDP_datagram = new DatagramPacket(
+                raw_bytes,
+                raw_bytes.length,
+                InetAddress.getByName(rcv_ip),
+                rcv_data_port
+            );
+
+            
+
+            while (timeout_count < 3){
+
+                System.out.println("Sending SOT packet");
+                sender_socket.send(UDP_datagram);
+
+                try {
     
-        // Stop and weight
-        if(args.length == 5) {
-
-            try {
-                
-                sender_socket = new DatagramSocket(sender_ack_port);
-                sender_socket.setSoTimeout(timeout_ms);
-
-                DSPacket SOT_packet = new DSPacket(DSPacket.TYPE_SOT, 0, null);
-                byte[] raw_bytes = SOT_packet.toBytes();
+                    byte[] buffer = new byte[DSPacket.MAX_PACKET_SIZE];
+                    DatagramPacket ackUDP = new DatagramPacket(buffer, buffer.length);
+        
+                    sender_socket.receive(ackUDP);
+                    System.out.println("Received packet");
     
-                DatagramPacket UDP_datagram = new DatagramPacket(
-                    raw_bytes,
-                    raw_bytes.length,
-                    InetAddress.getByName(rcv_ip),
-                    rcv_data_port
-                );
-
-                int timeout_count = 0;
-
-                // initial handshake
-                while (timeout_count < 3){
-
-                    System.out.println("Sending SOT packet");
-                    sender_socket.send(UDP_datagram);
-
-                    try {
         
-                        byte[] buffer = new byte[DSPacket.MAX_PACKET_SIZE];
-                        DatagramPacket ackUDP = new DatagramPacket(buffer, buffer.length);
-            
-                        sender_socket.receive(ackUDP);
-                        System.out.println("Received ACK packet");
+                    DSPacket ackPacket = new DSPacket(ackUDP.getData());
         
-            
-                        DSPacket ackPacket = new DSPacket(ackUDP.getData());
-            
-                        if(ackPacket.getType() == DSPacket.TYPE_ACK && ackPacket.getSeqNum() == 0) {
-            
-                            System.out.println("Handshake complete!");
-                            break;
-                        }
-            
-            
-            
-                    } catch (SocketTimeoutException  e) {
-                        // TODO: handle exception
-                        timeout_count ++;
-                        System.out.println("Timeout waiting for ACK (" + timeout_count + "/3)");
+                    if(ackPacket.getType() == DSPacket.TYPE_ACK && ackPacket.getSeqNum() == 0) {
+        
+                        System.out.println("Received ACK, Handshake complete!");
+                        break;
+
                     }
-
+        
+                } catch (SocketTimeoutException  e) {
+                    // TODO: handle exception
+                    timeout_count ++;
+                    System.out.println("Timeout waiting for handshake ACK (" + timeout_count + "/3)");
                 }
 
-                if(timeout_count==3){
-                    System.out.println("Error, failed to complete handshake");
-                    return;
-                }
+            }
 
-                // open file
+            if(timeout_count==3){
+                System.out.println("Error, failed to complete handshake");
+                return;
+            }
+
+            // open file
+            input_stream = new FileInputStream(input_file);
+            byte[] file_buffer = new byte[DSPacket.MAX_PAYLOAD_SIZE];
+            byte[] payload;
+            int bytes_read = 0;
+
+            timeout_count = 0;
+
+            // set timer to track length
+
+            // Stop and wait
+            if(args.length == 5) {
+
+        
                 int sequence_number = 1;
-                timeout_count=0;
 
                 byte[] buffer = new byte[DSPacket.MAX_PACKET_SIZE];
-                DatagramPacket ackUDP = new DatagramPacket(buffer, buffer.length);
-                sender_socket.setSoTimeout(timeout_ms);
+                DatagramPacket RESPONSE_datagram = new DatagramPacket(buffer, buffer.length);
 
-                input_stream = new FileInputStream(input_file);
-                byte[] file_buffer = new byte[DSPacket.MAX_PAYLOAD_SIZE];
-
-
+                
                 while(true) {
-                    int bytes_read = input_stream.read(file_buffer);
+                    bytes_read = input_stream.read(file_buffer);
 
                     if(bytes_read==-1){
                         break;
@@ -100,7 +109,7 @@ public class Sender {
 
                     timeout_count = 0;
 
-                    byte[] payload = Arrays.copyOf(file_buffer, bytes_read);
+                    payload = Arrays.copyOf(file_buffer, bytes_read);
 
                     DSPacket DATA_packet = new DSPacket(DSPacket.TYPE_DATA, sequence_number, payload);
                     raw_bytes = DATA_packet.toBytes();
@@ -112,25 +121,19 @@ public class Sender {
                         rcv_data_port
                     );
 
-                    
-
-                    // maybe loop through file 124 bytes per time
                     while(timeout_count < 3){
                         sender_socket.send(UDP_datagram);
 
                         try {
                         
-                            // read max 124 bytes from file, put this in data and replace for null
-                        
-                            
-
-                            sender_socket.receive(ackUDP);
-                            DSPacket ackPacket = new DSPacket(ackUDP.getData());
+                            sender_socket.receive(RESPONSE_datagram);
+                            DSPacket ackPacket = new DSPacket(RESPONSE_datagram.getData());
                 
-                            if(ackPacket.getType() == DSPacket.TYPE_ACK && ackPacket.getSeqNum() == sequence_number) {
+                            if(ackPacket.getType() == DSPacket.TYPE_ACK && ackPacket.getSeqNum() == (sequence_number%128)) {
                 
                                 System.out.println("ACK Received!");
                                 sequence_number ++;
+                                break;
                             }
     
                         } catch (SocketTimeoutException  e) {
@@ -149,12 +152,13 @@ public class Sender {
                     
                 }
 
-                // send EOF when the file is done and then break from loops
 
+                // send EOF when the file is done and then break from loop
+                
                 DSPacket EOT_packet = new DSPacket(DSPacket.TYPE_EOT, sequence_number, null);
                 raw_bytes = EOT_packet.toBytes();
                 timeout_count = 0;
-    
+
                 UDP_datagram = new DatagramPacket(
                     raw_bytes,
                     raw_bytes.length,
@@ -165,48 +169,152 @@ public class Sender {
                 while(timeout_count < 3){
                     sender_socket.send(UDP_datagram);
 
-                        try {
+                    try {
                         
-                            sender_socket.receive(ackUDP);
-                            DSPacket ackPacket = new DSPacket(ackUDP.getData());
+                        sender_socket.receive(RESPONSE_datagram);
+                        DSPacket ackPacket = new DSPacket(RESPONSE_datagram.getData());
                 
-                            if(ackPacket.getType() == DSPacket.TYPE_EOT && ackPacket.getSeqNum() == sequence_number) {
+                        if(ackPacket.getType() == DSPacket.TYPE_EOT && ackPacket.getSeqNum() == (sequence_number%128)) {
         
-                                System.out.println("EOT Received!");
-                                break;
-                            }
-    
-                        } catch (SocketTimeoutException  e) {
-                            // TODO: handle exception
-                            timeout_count ++;
-                            System.out.println("Timeout waiting for EOT ACK (" + timeout_count + "/3)");
+                            System.out.println("EOT Received!");
+                            break;
                         }
+
+                    } catch (SocketTimeoutException  e) {
+                        // TODO: handle exception
+                        timeout_count ++;
+                        System.out.println("Timeout waiting for EOT ACK (" + timeout_count + "/3)");
+                    }
 
                 }
 
-
-                // print the total time
-
-            } catch (Exception e) {
-                // TODO: handle exception
-                System.out.println(e.getStackTrace());
-            } finally {
-
-                if(input_stream != null) input_stream.close();
-                if(sender_socket != null) sender_socket.close();
             }
 
+            // go back N
+            else if(args.length==6){
+
+                int window_size = Integer.parseInt(args[5]);
+                int base = 1;
+                int nextSeq = 1;
+                HashMap<Integer, DatagramPacket> window_buffer = new HashMap<>();
+
+                byte[] buffer = new byte[DSPacket.MAX_PACKET_SIZE];
+                DatagramPacket RESPONSE_datagram = new DatagramPacket(buffer, buffer.length);
+
+                // continue unil EOF or while we still have unack packets in window
+                while(bytes_read!=-1 || window_buffer.size() != 0){
+
+                    // Send window of packets 
+                    while((((nextSeq - base + 128) % 128) < window_size) && bytes_read!=-1){
+                        bytes_read = input_stream.read(file_buffer);
+
+                        if(bytes_read==-1){
+                            break;
+                        }
+
+                        payload = Arrays.copyOf(file_buffer, bytes_read);
+
+                        DSPacket DATA_packet = new DSPacket(DSPacket.TYPE_DATA, nextSeq, payload);
+                        raw_bytes = DATA_packet.toBytes();
+            
+                        UDP_datagram = new DatagramPacket(
+                            raw_bytes,
+                            raw_bytes.length,
+                            InetAddress.getByName(rcv_ip),
+                            rcv_data_port
+                        );
+
+                        // store packet in buffer
+                        window_buffer.put(nextSeq,UDP_datagram);
+                        nextSeq = (nextSeq + 1) % 128;
+                        sender_socket.send(UDP_datagram);
+
+                        // for chaos engine, create a list of size 4 and append packets to it
+                        // when size is 4, apply the chaos engine aand then iterate over the packets
+                        // send each packet, then clear list
+                        // only send packets in groups of 4?
+                    
+
+                    }
+                    // if that list isnt empty, send remaining packets and then clear it
+
+                    // receive ACKs
+                    try {
+                        sender_socket.receive(RESPONSE_datagram);
+
+                        DSPacket ackPacket = new DSPacket(RESPONSE_datagram.getData());
+                        int ack_num = ackPacket.getSeqNum();
+                        // the received ACK has sequence number in order
+                        if(ackPacket.getType() == DSPacket.TYPE_ACK && ((ack_num - base + 128) % 128 < (nextSeq - base + 128) % 128)) {
+                            // reset the timeout counts
+                            timeout_count = 0;
+
+                            System.out.println("ACK Received for sequence number: " + ackPacket.getSeqNum());
+
+                            int old_base = base;
+                            base = (ack_num+1)%128;
+
+                            // go over the windowbuffer and remove the packets that were cumulative ACKed
+                            while(old_base!= base){
+                                window_buffer.remove(old_base);
+                                old_base = (old_base+1)%128;
+                            }
+
+                          
+                        }
+
+                    } 
+                    
+                    catch (SocketTimeoutException e) {
+                        // TODO: handle exception
+                        // if base is still in window, increment timeout count.
+                        // if timeout count is 3, then we have reached failure so exit loop
+                        // otherwise retransmit window
+                        // retransmit the window
+                        if(window_buffer.get(base)!=null) timeout_count++;
+                        if(timeout_count==3) break;
+
+                        for(int i = base; i != nextSeq; i=(i+1)%128){
+                            DatagramPacket datagram = window_buffer.get(i);
+                            sender_socket.send(datagram);
+                        }
+
+                        // repeat the same logic for chaos engine above
+                        
+
+                    }
+                    
+                }
+
+            }
+
+
+
+
         }
-    
-    
-    
-        // go back N
-        else if(args.length == 6){
-            int window_size = Integer.parseInt(args[5]);
+
+
+
+
+        catch (Exception e) {
+            // TODO: handle exception
+            System.out.println(e.getStackTrace());
+        } 
+        
+        
+        finally {
+
+            // print the total time
+
+            if(input_stream != null) input_stream.close();
+            if(sender_socket != null) sender_socket.close();
         }
     
 
-    }
-    
+
+            
+    } 
+        
+         
 }
 
